@@ -1,0 +1,2 @@
+# attractmode
+Vibe-coded fun
