@@ -1,0 +1,474 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Monsoon Trader</title>
+<style>
+:root{--bg:#0b0a06;--fg:#ffb000;--dim:#9a6a00;--hi:#ffd36b;--bad:#ff6a4a;--good:#a8ff7a}
+*{box-sizing:border-box}
+html,body{background:var(--bg)}
+body{margin:0;color:var(--fg);font-family:"Courier New",ui-monospace,Menlo,Consolas,monospace;font-size:16px;line-height:1.45;text-shadow:0 0 4px rgba(255,176,0,.35)}
+#wrap{max-width:820px;margin:0 auto;padding:16px}
+h1{font-size:22px;letter-spacing:5px;margin:6px 0 14px;text-align:center;color:var(--hi)}
+.panel{border:2px solid var(--fg);padding:10px 12px;margin-bottom:12px}
+.row{display:flex;flex-wrap:wrap;gap:4px 26px}
+table{width:100%;border-collapse:collapse}
+th,td{text-align:left;padding:3px 6px;vertical-align:middle}
+th{color:var(--dim);font-weight:normal;border-bottom:1px dashed var(--dim)}
+.n{text-align:right}
+button{background:transparent;color:var(--fg);border:1px solid var(--fg);font:inherit;padding:5px 11px;margin:3px;cursor:pointer;text-shadow:inherit}
+button:hover:not(:disabled),button:focus-visible{background:var(--fg);color:var(--bg);outline:none}
+button:disabled{opacity:.3;cursor:default}
+#log{height:170px;overflow-y:auto;white-space:pre-wrap}
+#log div{margin-bottom:2px}
+.bad{color:var(--bad)}.good{color:var(--good)}.hi{color:var(--hi)}.dim{color:var(--dim)}
+.big{font-size:20px;letter-spacing:2px}
+#modal{position:fixed;inset:0;background:rgba(0,0,0,.78);display:none;align-items:center;justify-content:center;padding:16px;z-index:5}
+#modal .box{background:var(--bg);border:2px solid var(--fg);padding:16px;max-width:480px;width:100%}
+input{background:#000;color:var(--hi);border:1px solid var(--fg);font:inherit;padding:7px;width:100%;margin:10px 0}
+.scan{pointer-events:none;position:fixed;inset:0;z-index:10;background:repeating-linear-gradient(transparent 0 2px,rgba(0,0,0,.2) 2px 4px)}
+.ships{font-size:22px;letter-spacing:4px;margin:10px 0;color:var(--bad)}
+@media (max-width:560px){body{font-size:14px}button{padding:5px 8px}}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <h1>M O N S O O N &nbsp; T R A D E R</h1>
+  <div id="main"></div>
+  <div class="panel"><div id="log"></div></div>
+</div>
+<div id="modal"><div class="box" id="mbox"></div></div>
+<div class="scan"></div>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+
+const PORTS = ["Karavel", "Port Ossin", "Tamarind Bay", "Velloria", "Hesk", "Lantern Key", "Marrow Point"];
+const HOME = 0;
+const GOODS = [
+  { name: "Pepper",    lo: 6,    hi: 40   },
+  { name: "Indigo",    lo: 40,   hi: 200  },
+  { name: "Porcelain", lo: 180,  hi: 800  },
+  { name: "Pearls",    lo: 1500, hi: 9000 }
+];
+const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+const DEBT_RATE = 0.08, BANK_RATE = 0.005, GUN_SPACE = 10;
+
+let S = null;
+
+/* ---------- helpers ---------- */
+const rnd = n => Math.floor(Math.random() * n);
+const chance = p => Math.random() < p;
+const fmt = n => {
+  n = Math.floor(n);
+  if (Math.abs(n) >= 1e6) return (n / 1e6).toFixed(2) + "M";
+  return n.toLocaleString("en-US");
+};
+const esc = s => String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const plural = (n, w) => n + " " + w + (n === 1 ? "" : "s");
+
+function log(msg, cls) {
+  const d = document.createElement("div");
+  if (cls) d.className = cls;
+  d.textContent = msg;
+  $("log").appendChild(d);
+  $("log").scrollTop = $("log").scrollHeight;
+}
+
+const cargoTotal = () => S.cargo.reduce((a, b) => a + b, 0);
+const wareTotal  = () => S.ware.reduce((a, b) => a + b, 0);
+const holdUsed   = () => cargoTotal() + S.guns * GUN_SPACE;
+const holdFree   = () => S.hold - holdUsed();
+const netWorth   = () => S.cash + S.bank - S.debt;
+const dateStr    = () => MONTHS[S.month % 12] + " " + (1820 + Math.floor(S.month / 12));
+const repairRate = () => 30 + S.month * 2;
+const gunPrice   = () => 500 + S.month * 12;
+
+/* ---------- modal ---------- */
+function closeModal() { $("modal").style.display = "none"; }
+
+function ask(title, text, max, cb) {
+  if (max <= 0) { log(text.split("\n")[0] + " — not possible right now.", "dim"); return; }
+  $("mbox").innerHTML =
+    `<div class="hi">${title}</div><div>${text}</div>
+     <input id="qty" type="number" min="0" max="${max}" inputmode="numeric" placeholder="0 – ${max}">
+     <div><button id="ok">OK</button><button id="mx">Max (${fmt(max)})</button><button id="cx">Cancel</button></div>`;
+  $("modal").style.display = "flex";
+  const q = $("qty"); q.focus();
+  const done = v => {
+    closeModal();
+    if (v === null) return;
+    v = Math.floor(Number(v));
+    if (Number.isFinite(v) && v > 0) cb(Math.min(v, max));
+  };
+  $("ok").onclick = () => done(q.value);
+  $("mx").onclick = () => done(max);
+  $("cx").onclick = () => done(null);
+  q.onkeydown = e => { if (e.key === "Enter") done(q.value); if (e.key === "Escape") done(null); };
+}
+
+function choose(title, text, opts) {
+  $("mbox").innerHTML = `<div class="hi">${title}</div><div>${text}</div><div id="opts" style="margin-top:10px"></div>`;
+  const o = $("opts");
+  opts.forEach(op => {
+    const b = document.createElement("button");
+    b.textContent = op.label;
+    b.disabled = !!op.disabled;
+    b.onclick = () => { closeModal(); if (op.fn) op.fn(); };
+    o.appendChild(b);
+  });
+  $("modal").style.display = "flex";
+  const first = o.querySelector("button:not(:disabled)");
+  if (first) first.focus();
+}
+
+/* ---------- start ---------- */
+function getBest() { try { return JSON.parse(localStorage.getItem("monsoon-best")); } catch (e) { return null; } }
+function setBest(b) { try { localStorage.setItem("monsoon-best", JSON.stringify(b)); } catch (e) {} }
+
+function titleScreen() {
+  const best = getBest();
+  $("main").innerHTML =
+    `<div class="panel">
+      <p>The year is 1820. The Saffron Isles are rich, the seas are not safe, and you owe the
+      moneylender of Karavel <span class="bad">2,000</span> silver.</p>
+      <p>Buy cheap, sell dear, keep your hull afloat. Retire at Karavel when you're rich enough to stop.</p>
+      ${best ? `<p class="dim">Best fortune so far: ${fmt(best.worth)} — Captain ${esc(best.name)}</p>` : ""}
+      <div>What is your name, Captain?</div>
+      <input id="nm" maxlength="24" placeholder="Your name">
+      <button id="go">Begin</button>
+    </div>`;
+  $("log").innerHTML = "";
+  const go = () => startGame($("nm").value.trim() || "Nobody");
+  $("go").onclick = go;
+  $("nm").onkeydown = e => { if (e.key === "Enter") go(); };
+  $("nm").focus();
+}
+
+function startGame(name) {
+  S = { name, port: HOME, month: 0, cash: 500, bank: 0, debt: 2000, hull: 100, guns: 1, hold: 60,
+        cargo: [0, 0, 0, 0], ware: [0, 0, 0, 0], wareCap: 1000, prices: [], mode: null };
+  log(`Captain ${name}, your ship is moored at Karavel. Good fortune.`, "hi");
+  setPrices();
+  render();
+}
+
+/* ---------- markets ---------- */
+function setPrices() {
+  S.prices = GOODS.map(g => Math.max(1, Math.round(g.lo + Math.random() * (g.hi - g.lo))));
+  if (chance(0.2)) {
+    const i = rnd(GOODS.length), g = GOODS[i].name.toLowerCase();
+    if (chance(0.5)) {
+      S.prices[i] = Math.round(S.prices[i] * (3 + Math.random() * 3));
+      log(`Dockside rumour: there's a shortage of ${g} here. Prices have soared!`, "hi");
+    } else {
+      S.prices[i] = Math.max(1, Math.round(S.prices[i] / (3 + Math.random() * 3)));
+      log(`The market is flooded with ${g}. It's going cheap!`, "hi");
+    }
+  }
+}
+
+function buy(i) {
+  const p = S.prices[i];
+  const max = Math.min(Math.floor(S.cash / p), holdFree());
+  if (max <= 0) { log(S.cash < p ? "You can't afford any." : "Your hold is full.", "dim"); return; }
+  ask(`Buy ${GOODS[i].name}`, `Price ${fmt(p)} each. You can take up to ${fmt(max)}.`, max, q => {
+    S.cash -= q * p; S.cargo[i] += q;
+    log(`Bought ${fmt(q)} ${GOODS[i].name.toLowerCase()} for ${fmt(q * p)}.`);
+    render();
+  });
+}
+
+function sell(i) {
+  const p = S.prices[i], max = S.cargo[i];
+  ask(`Sell ${GOODS[i].name}`, `Price ${fmt(p)} each. You have ${fmt(max)} aboard.`, max, q => {
+    S.cash += q * p; S.cargo[i] -= q;
+    log(`Sold ${fmt(q)} ${GOODS[i].name.toLowerCase()} for ${fmt(q * p)}.`, "good");
+    render();
+  });
+}
+
+/* ---------- home-port services ---------- */
+function bankMenu() {
+  choose("Bank of Karavel", `Balance: ${fmt(S.bank)}. Pays ${(BANK_RATE * 100).toFixed(1)}% a month.`, [
+    { label: "Deposit", disabled: S.cash <= 0, fn: () => ask("Deposit", `Cash on hand: ${fmt(S.cash)}`, S.cash, q => {
+        S.cash -= q; S.bank += q; log(`Deposited ${fmt(q)}.`); render(); }) },
+    { label: "Withdraw", disabled: S.bank <= 0, fn: () => ask("Withdraw", `In the bank: ${fmt(S.bank)}`, S.bank, q => {
+        S.bank -= q; S.cash += q; log(`Withdrew ${fmt(q)}.`); render(); }) },
+    { label: "Leave" }
+  ]);
+}
+
+function lender() {
+  const canBorrow = Math.max(0, (S.cash + S.bank) * 2 + 1000 - S.debt);
+  choose("The Moneylender", `You owe ${fmt(S.debt)}. Interest: ${DEBT_RATE * 100}% a month, compounding. He smiles thinly.`, [
+    { label: "Repay", disabled: S.debt <= 0 || S.cash <= 0, fn: () => ask("Repay", `You owe ${fmt(S.debt)}.`, Math.min(S.cash, S.debt), q => {
+        S.cash -= q; S.debt -= q;
+        log(S.debt === 0 ? "Debt paid in full. The moneylender looks almost disappointed." : `Repaid ${fmt(q)}.`, "good");
+        render(); }) },
+    { label: "Borrow", disabled: canBorrow <= 0, fn: () => ask("Borrow", `He'll lend you up to ${fmt(canBorrow)}.`, canBorrow, q => {
+        S.cash += q; S.debt += q; log(`Borrowed ${fmt(q)}.`, "bad"); render(); }) },
+    { label: "Leave" }
+  ]);
+}
+
+function warehouse() {
+  const free = S.wareCap - wareTotal();
+  const opts = [];
+  GOODS.forEach((g, i) => {
+    opts.push({ label: `Store ${g.name}`, disabled: !S.cargo[i] || free <= 0, fn: () =>
+      ask(`Store ${g.name}`, `Aboard: ${fmt(S.cargo[i])}. Warehouse space: ${fmt(free)}.`, Math.min(S.cargo[i], free), q => {
+        S.cargo[i] -= q; S.ware[i] += q; log(`Stored ${fmt(q)} ${g.name.toLowerCase()}.`); render(); }) });
+    opts.push({ label: `Fetch ${g.name}`, disabled: !S.ware[i] || holdFree() <= 0, fn: () =>
+      ask(`Fetch ${g.name}`, `In storage: ${fmt(S.ware[i])}. Hold space: ${fmt(holdFree())}.`, Math.min(S.ware[i], holdFree()), q => {
+        S.ware[i] -= q; S.cargo[i] += q; log(`Loaded ${fmt(q)} ${g.name.toLowerCase()}.`); render(); }) });
+  });
+  opts.push({ label: "Leave" });
+  choose("Warehouse", `Holds ${fmt(wareTotal())} of ${fmt(S.wareCap)}. Goods here are safe from raiders and storms.`, opts);
+}
+
+/* ---------- shipyard ---------- */
+function shipyard() {
+  const rate = repairRate(), gp = gunPrice(), dmg = 100 - S.hull;
+  choose(`Shipyard — ${PORTS[S.port]}`, `Hull at ${S.hull}%. Repairs cost ${fmt(rate)} per point. Guns cost ${fmt(gp)} and take ${GUN_SPACE} hold space each.`, [
+    { label: "Repair", disabled: dmg <= 0 || S.cash < rate, fn: () =>
+      ask("Repair hull", `How many points? Full repair costs ${fmt(dmg * rate)}.`, Math.min(dmg, Math.floor(S.cash / rate)), q => {
+        S.cash -= q * rate; S.hull += q; log(`Repaired ${q} points of hull.`, "good"); render(); }) },
+    { label: "Buy gun", disabled: S.cash < gp || holdFree() < GUN_SPACE, fn: () => {
+        S.cash -= gp; S.guns++; log(`A new gun is mounted. You now have ${plural(S.guns, "gun")}.`, "good"); render(); } },
+    { label: "Sell gun", disabled: S.guns <= 0, fn: () => {
+        const v = Math.floor(gp / 3); S.cash += v; S.guns--; log(`Sold a gun for ${fmt(v)}.`); render(); } },
+    { label: "Leave" }
+  ]);
+}
+
+/* ---------- voyage ---------- */
+function sailMenu() {
+  if (S.hull < 25) log("Your hull is in poor shape. The shipyard might be wise.", "bad");
+  choose("Set sail", "Where to, Captain?", PORTS.map((p, i) => ({
+    label: p, disabled: i === S.port, fn: () => sail(i)
+  })).concat([{ label: "Stay" }]));
+}
+
+function sail(dest) {
+  S.month++;
+  if (S.debt > 0) S.debt = Math.ceil(S.debt * (1 + DEBT_RATE));
+  S.bank = Math.floor(S.bank * (1 + BANK_RATE));
+  S.dest = dest;
+  log(`— You weigh anchor for ${PORTS[dest]}. —`, "dim");
+  const raidOdds = 0.15 + Math.min(0.15, S.month / 240) + Math.min(0.1, cargoTotal() / 2000);
+  if (chance(raidOdds)) return startCombat();
+  finishVoyage();
+}
+
+function finishVoyage() {
+  let dest = S.dest;
+  if (chance(0.1)) {
+    const dmg = 4 + rnd(18);
+    S.hull -= dmg;
+    log(`A storm rakes the ship! The hull takes ${dmg} points of damage.`, "bad");
+    if (S.hull <= 0) return gameOver("Your ship broke apart in the storm and went down with all hands.");
+    if (chance(0.3)) {
+      let d; do { d = rnd(PORTS.length); } while (d === dest);
+      dest = d;
+      log(`The storm drives you off course to ${PORTS[dest]}!`, "bad");
+    }
+  }
+  arrive(dest);
+}
+
+function arrive(p) {
+  S.port = p; S.mode = null;
+  log(`Arrived at ${PORTS[p]}, ${dateStr()}.`, "hi");
+  setPrices();
+  if (p === HOME && S.debt > 25000 && chance(0.5)) {
+    const take = Math.floor(S.cash * 0.4);
+    if (take > 0) {
+      S.cash -= take;
+      log(`The moneylender's men meet you at the dock and "collect" ${fmt(take)} of your cash.`, "bad");
+    }
+  }
+  render();
+  if (chance(0.18)) offerHold();
+  else if (chance(0.15)) offerGun();
+}
+
+function offerHold() {
+  const add = 30, price = 1000 + S.month * 40;
+  choose("A shipwright approaches", `He'll refit your ship to carry ${add} more units for ${fmt(price)}.`, [
+    { label: "Accept", disabled: S.cash < price, fn: () => {
+        S.cash -= price; S.hold += add; log(`Your hold now carries ${S.hold}.`, "good"); render(); } },
+    { label: "Decline" }
+  ]);
+}
+
+function offerGun() {
+  const price = Math.floor(gunPrice() * 0.8);
+  choose("An arms dealer whispers", `A gun, cheap, ${fmt(price)}. No questions asked.`, [
+    { label: "Buy it", disabled: S.cash < price || holdFree() < GUN_SPACE, fn: () => {
+        S.cash -= price; S.guns++; log(`You now have ${plural(S.guns, "gun")}.`, "good"); render(); } },
+    { label: "Decline" }
+  ]);
+}
+
+/* ---------- combat ---------- */
+function startCombat() {
+  const cap = Math.min(18, 2 + Math.floor(S.month / 5) + Math.floor(Math.max(0, netWorth()) / 25000));
+  const n = 1 + rnd(cap);
+  S.mode = "combat"; S.foes = n; S.foesStart = n; S.runBonus = 0;
+  S.booty = Math.floor(n * (120 + rnd(250)) * (1 + S.month / 18));
+  log(`${n === 1 ? "A raider ship has" : n + " raider ships have"} been sighted, and they're closing fast!`, "bad");
+  render();
+}
+
+function renderCombat() {
+  $("main").innerHTML =
+    `<div class="panel">
+      <div class="big bad">⚔ UNDER ATTACK</div>
+      <div class="ships">${"▲".repeat(S.foes)}</div>
+      <div class="row"><span>Raiders: <span class="hi">${S.foes}</span></span>
+        <span>Hull: <span class="${S.hull < 40 ? "bad" : "hi"}">${S.hull}%</span></span>
+        <span>Guns: <span class="hi">${S.guns}</span></span>
+        <span>Cargo aboard: ${fmt(cargoTotal())}</span></div>
+      <div style="margin-top:10px">
+        <button onclick="fight()" ${S.guns ? "" : "disabled"}>Fight</button>
+        <button onclick="run()">Run</button>
+        <button onclick="jettison()" ${cargoTotal() ? "" : "disabled"}>Throw cargo &amp; run</button>
+      </div>
+    </div>`;
+}
+
+function fight() {
+  let sunk = 0;
+  for (let g = 0; g < S.guns && S.foes > 0; g++) {
+    if (chance(0.32)) { S.foes--; sunk++; }
+  }
+  log(sunk ? `Broadside! You sink ${plural(sunk, "ship")}.` : "Your shots go wide.", sunk ? "good" : "dim");
+  if (S.foes === 0) return victory();
+  if (S.foes > 2 && chance(0.12)) {
+    const fled = 1 + rnd(Math.floor(S.foes / 2));
+    S.foes -= fled;
+    log(`${plural(fled, "raider")} lose${fled === 1 ? "s" : ""} their nerve and flee${fled === 1 ? "s" : ""}.`, "good");
+  }
+  enemyFire();
+}
+
+function run() {
+  const p = Math.max(0.12, 0.6 - S.foes * 0.03) + S.runBonus;
+  if (chance(p)) {
+    log("You catch the wind and slip away!", "good");
+    S.mode = null;
+    return finishVoyage();
+  }
+  log("They're still on your stern!", "bad");
+  S.runBonus += 0.05;
+  enemyFire();
+}
+
+function jettison() {
+  const n = cargoTotal();
+  S.cargo = S.cargo.map(() => 0);
+  S.runBonus += 0.25;
+  log(`You heave ${fmt(n)} units of cargo overboard to lighten the ship.`, "bad");
+  run();
+}
+
+function enemyFire() {
+  let dmg = 0;
+  for (let i = 0; i < S.foes; i++) if (chance(0.35)) dmg += 1 + rnd(4);
+  dmg = Math.min(dmg, 40);
+  if (dmg === 0) { log("Their volley falls short.", "dim"); return render(); }
+  S.hull -= dmg;
+  log(`You're hit! The hull takes ${dmg} points of damage.`, "bad");
+  if (dmg >= 8 && S.guns > 0 && chance(0.3)) { S.guns--; log("A gun has been knocked out of action!", "bad"); }
+  if (S.hull <= 0) return gameOver("Your ship was sunk by raiders.");
+  render();
+}
+
+function victory() {
+  S.mode = null;
+  S.cash += S.booty;
+  log(`Victory! You take ${fmt(S.booty)} in plunder from the wreckage.`, "good");
+  finishVoyage();
+}
+
+/* ---------- endings ---------- */
+function rank(w) {
+  if (w < 0) return "Debtor";
+  if (w < 50000) return "Deckhand";
+  if (w < 250000) return "Ship's Purser";
+  if (w < 1000000) return "Merchant";
+  if (w < 5000000) return "Merchant Prince";
+  return "Lord of the Monsoon";
+}
+
+function endScreen(headline, worth, survived) {
+  S.mode = "over";
+  const best = getBest();
+  const isBest = survived && (!best || worth > best.worth);
+  if (isBest) setBest({ name: S.name, worth });
+  $("main").innerHTML =
+    `<div class="panel">
+      <div class="big ${survived ? "hi" : "bad"}">${headline}</div>
+      <p>Captain ${esc(S.name)}, ${dateStr()}: ${plural(S.month, "month")} at sea.</p>
+      ${survived ? `<p>Final fortune: <span class="hi">${fmt(worth)}</span><br>Rank: <span class="hi">${rank(worth)}</span></p>` : ""}
+      ${isBest ? `<p class="good">A new best fortune!</p>` : ""}
+      <button onclick="titleScreen()">Play again</button>
+    </div>`;
+}
+
+function gameOver(msg) {
+  log(msg, "bad");
+  endScreen("LOST AT SEA", 0, false);
+}
+
+function retire() {
+  choose("Retire?", `Your net worth is ${fmt(netWorth())}. Cargo and warehouse stock don't count, so sell first. Retire now?`, [
+    { label: "Retire", fn: () => endScreen("YOU RETIRE", netWorth(), true) },
+    { label: "Keep sailing" }
+  ]);
+}
+
+/* ---------- main screen ---------- */
+function render() {
+  if (S.mode === "combat") return renderCombat();
+  if (S.mode === "over") return;
+  const home = S.port === HOME;
+  let h =
+    `<div class="panel">
+      <div class="row"><span>Captain <span class="hi">${esc(S.name)}</span></span>
+        <span>Port: <span class="hi">${PORTS[S.port]}</span></span>
+        <span>Date: <span class="hi">${dateStr()}</span></span></div>
+      <div class="row"><span>Cash: <span class="hi">${fmt(S.cash)}</span></span>
+        <span>Bank: ${fmt(S.bank)}</span>
+        <span>Debt: <span class="${S.debt > 0 ? "bad" : ""}">${fmt(S.debt)}</span></span>
+        <span>Net worth: ${fmt(netWorth())}</span></div>
+      <div class="row"><span>Hull: <span class="${S.hull < 50 ? "bad" : ""}">${S.hull}%</span></span>
+        <span>Guns: ${S.guns}</span>
+        <span>Hold: ${holdUsed()}/${S.hold} (${holdFree()} free)</span></div>
+    </div>
+    <div class="panel"><table>
+      <tr><th>Goods</th><th class="n">Price</th><th class="n">Aboard</th>${home ? '<th class="n">Stored</th>' : ""}<th></th></tr>`;
+  GOODS.forEach((g, i) => {
+    h += `<tr><td>${g.name}</td><td class="n hi">${fmt(S.prices[i])}</td><td class="n">${fmt(S.cargo[i])}</td>
+      ${home ? `<td class="n">${fmt(S.ware[i])}</td>` : ""}
+      <td class="n"><button onclick="buy(${i})">Buy</button><button onclick="sell(${i})" ${S.cargo[i] ? "" : "disabled"}>Sell</button></td></tr>`;
+  });
+  h += `</table></div>
+    <div class="panel">
+      <button onclick="sailMenu()">Set sail</button>
+      <button onclick="shipyard()">Shipyard</button>
+      ${home ? `<button onclick="bankMenu()">Bank</button>
+        <button onclick="lender()">Moneylender</button>
+        <button onclick="warehouse()">Warehouse</button>
+        <button onclick="retire()">Retire</button>` : `<span class="dim">The bank, moneylender and warehouse are at Karavel.</span>`}
+    </div>`;
+  $("main").innerHTML = h;
+}
+
+titleScreen();
+</script>
+</body>
+</html>
